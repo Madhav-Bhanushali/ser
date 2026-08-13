@@ -13,6 +13,12 @@
 #   * Writes benchmark_results.csv + benchmark_results.json and prints
 #     a summary table.
 #
+# DEPLOYMENT
+#   Easiest: upload this script + your models/ folder to the server,
+#   then run it. If the repo root (CMakeLists.txt, src/, 3rdparty/)
+#   is not present, the script clones microsoft/BitNet (with the
+#   I2_S llama.cpp submodule) into ./bitnet automatically.
+#
 # Usage:
 #   sudo bash server_benchmark.sh            # full install + run all models
 #   bash server_benchmark.sh -m <model>      # run a single model
@@ -34,6 +40,16 @@ TEMP_DIR="$ROOT/benchmark_temp"
 
 LLAMA_DIR="$ROOT/3rdparty/llama.cpp"
 LLAMA_FORK_URL="https://github.com/isHuangXin/llama.cpp.git"
+
+# Top-level bitnet.cpp repo that contains CMakeLists.txt, src/ and the
+# I2_S fork submodule. If the script was deployed without the repo root,
+# we clone it here so the build has everything it needs.
+BITNET_REPO_URL="https://github.com/microsoft/BitNet.git"
+REPO_DIR="$ROOT"
+if [[ ! -f "$ROOT/CMakeLists.txt" ]]; then
+    REPO_DIR="$ROOT/bitnet"
+fi
+BUILD_SRC="$REPO_DIR"
 
 PORT=8080
 THREADS="$(nproc)"
@@ -232,11 +248,33 @@ install_deps() {
 # ============================================================
 
 ensure_llama_source() {
-    if [[ ! -d "$LLAMA_DIR/.git" ]]; then
+    # When the top-level repo is present, use its vendored fork.
+    if [[ -f "$ROOT/CMakeLists.txt" ]]; then
+        if [[ ! -d "$LLAMA_DIR/.git" ]]; then
+            echo ""
+            echo "llama.cpp fork not vendored - cloning BitNet fork into 3rdparty:"
+            rm -rf "$LLAMA_DIR"
+            mkdir -p "$(dirname "$LLAMA_DIR")"
+            git clone --depth 1 --branch release-bitnet-embedding-0.6b-270m "$LLAMA_FORK_URL" "$LLAMA_DIR"
+        fi
+        return
+    fi
+
+    # The script was deployed standalone (no repo root). Clone the full
+    # microsoft/BitNet repo (submodule = I2_S fork) into $REPO_DIR.
+    if [[ ! -f "$REPO_DIR/CMakeLists.txt" ]]; then
         echo ""
-        echo "llama.cpp fork not vendored - cloning BitNet fork:"
-        rm -rf "$LLAMA_DIR"
-        git clone --depth 1 "$LLAMA_FORK_URL" "$LLAMA_DIR"
+        echo "Repo root not deployed with the script - cloning microsoft/BitNet:"
+        echo "  -> $REPO_DIR"
+        rm -rf "$REPO_DIR"
+        git clone --depth 1 --recurse-submodules \
+            "$BITNET_REPO_URL" "$REPO_DIR"
+    else
+        echo "Using repo root: $REPO_DIR"
+        if [[ -d "$REPO_DIR/3rdparty/llama.cpp" && ! -d "$REPO_DIR/3rdparty/llama.cpp/.git" ]]; then
+            echo "Initializing submodule 3rdparty/llama.cpp..."
+            git -C "$REPO_DIR" submodule update --init --depth 1 --recursive
+        fi
     fi
 }
 
@@ -254,11 +292,16 @@ build_lama_server() {
         return
     fi
 
+    if [[ ! -f "$BUILD_SRC/CMakeLists.txt" ]]; then
+        echo "ERROR: could not find repo root CMakeLists.txt at $BUILD_SRC"
+        exit 1
+    fi
+
     mkdir -p "$BUILD_DIR"
 
     # Build the top-level bitnet.cpp project: it wires the fork's ggml
     # to the BitNet I2_S kernels in src/ and enables LLAMA_BUILD_SERVER.
-    cmake -S "$ROOT" -B "$BUILD_DIR" \
+    cmake -S "$BUILD_SRC" -B "$BUILD_DIR" \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_NATIVE=ON
 
